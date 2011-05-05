@@ -20,9 +20,12 @@
 package org.sonar.ide.eclipse.internal.jdt;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResource;
+import org.eclipse.core.resources.IWorkspaceRoot;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.jdt.core.IClasspathEntry;
+import org.eclipse.jdt.core.IJavaModel;
 import org.eclipse.jdt.core.IJavaProject;
 import org.eclipse.jdt.core.JavaCore;
 import org.eclipse.jdt.core.JavaModelException;
@@ -63,38 +66,78 @@ public class JavaProjectConfigurator extends ProjectConfigurator {
     LOG.info("Target Java version: {}", javaTarget);
 
     try {
-      IClasspathEntry[] classPath = javaProject.getResolvedClasspath(true);
-      for (IClasspathEntry entry : classPath) {
-        switch (entry.getEntryKind()) {
-          case IClasspathEntry.CPE_SOURCE:
-            String srcDir = getAbsolutePath(javaProject, entry.getPath());
-            LOG.debug("Source directory: {}", srcDir);
-            sonarProject.addSourceDir(srcDir);
-            if (entry.getOutputLocation() != null) {
-              String binDir = getAbsolutePath(javaProject, entry.getOutputLocation());
-              LOG.debug("Binary directory: {}", binDir);
-              sonarProject.addBinaryDir(binDir);
-            }
-            break;
-
-          case IClasspathEntry.CPE_LIBRARY:
-            String libDir = entry.getPath().toOSString();
-            LOG.debug("Library: {}", libDir);
-            sonarProject.addLibrary(libDir);
-            break;
-
-          default:
-            LOG.warn("Unhandled ClassPathEntry : {}", entry);
-            break;
-        }
-      }
-
-      String binDir = getAbsolutePath(javaProject, javaProject.getOutputLocation());
-      LOG.debug("Default binary directory: {}", binDir);
-      sonarProject.addBinaryDir(binDir);
+      addClassPathToSonarProject(javaProject, sonarProject, true);
     } catch (JavaModelException e) {
       LOG.error(e.getMessage(), e);
     }
+  }
+
+  /**
+   * Adds the classpath of an eclipse project to the sonarProject recursively, i.e
+   * it iterates all dependent projects. Libraries and output folders of dependent projects
+   * are added, but no source folders.
+   * @param javaProject the eclipse project to get the classpath from
+   * @param sonarProject the sonar project to add the classpath to
+   * @param addSourceDirs should source dirs of the project be added?
+   * @throws JavaModelException see {@link IJavaProject#getResolvedClasspath(boolean)}
+   */
+  private void addClassPathToSonarProject( IJavaProject javaProject, ProjectDefinition sonarProject, boolean addSourceDirs)
+      throws JavaModelException {
+    String defaultBinDir = getAbsolutePath(javaProject, javaProject.getOutputLocation());
+    LOG.debug("Default binary directory: {}", defaultBinDir);
+    sonarProject.addBinaryDir(defaultBinDir);
+    final IClasspathEntry[] classPath = javaProject.getResolvedClasspath(true);
+    for (IClasspathEntry entry : classPath) {
+      switch (entry.getEntryKind()) {
+        case IClasspathEntry.CPE_SOURCE:
+          if (addSourceDirs) {
+            String srcDir = getAbsolutePath(javaProject, entry.getPath());
+            LOG.debug("Source directory: {}", srcDir);
+            sonarProject.addSourceDir(srcDir);
+          }
+          if (entry.getOutputLocation() != null) {
+            String binDir = getAbsolutePath(javaProject, entry.getOutputLocation());
+            LOG.debug("Binary directory: {}", binDir);
+            sonarProject.addBinaryDir(binDir);
+          }
+          break;
+        case IClasspathEntry.CPE_LIBRARY:
+          final String libDir = resolveLibrary(javaProject, entry);
+          LOG.debug("Library: {}", libDir);
+          sonarProject.addLibrary(libDir);
+          break;
+        case IClasspathEntry.CPE_PROJECT:
+          IJavaModel javaModel = javaProject.getJavaModel();
+          IJavaProject referredProject = javaModel.getJavaProject(entry.getPath().segment(0));
+          LOG.debug("Adding project: {}", referredProject.getProject().getName());
+          addClassPathToSonarProject( referredProject, sonarProject, false);
+          break;
+        default:
+          LOG.warn("Unhandled ClassPathEntry : {}", entry);
+          break;
+      }
+    }
+  }
+
+  private String resolveLibrary(IJavaProject javaProject, IClasspathEntry entry) {
+    final String libDir;
+    IResource member = findPath(javaProject.getProject(), entry.getPath());
+    if (member != null) {
+      LOG.debug("Found member: {}",member.getLocation().toOSString());
+      libDir = member.getLocation().toOSString();
+    } else {
+      libDir = entry.getPath().makeAbsolute().toOSString();
+    }
+    return libDir;
+  }
+
+  private IResource findPath(IProject project, IPath path ) {
+    IResource member = project.findMember(path);
+    if (member == null) {
+      IWorkspaceRoot workSpaceRoot = project.getWorkspace().getRoot();
+      member = workSpaceRoot.findMember(path);
+    }
+    return member;
   }
 
   private String getAbsolutePath(IJavaProject javaProject, IPath path) {
